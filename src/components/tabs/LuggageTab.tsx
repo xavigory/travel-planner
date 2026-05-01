@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Trip } from '../../types';
 import { colors } from '../../constants/colors';
 import { fonts } from '../../constants/fonts';
@@ -33,6 +33,8 @@ export default function LuggageTab({ trip, upTrip, tpls, setTpls }: LuggageTabPr
   const [newItem, setNewItem] = useState('');
   const [newTpl, setNewTpl] = useState('');
   const [modal, setModal] = useState<string | null>(null);
+  const itemInputRef = useRef<HTMLInputElement>(null);
+  const tplInputRef = useRef<HTMLInputElement>(null);
 
   const items = trip.luggage || [];
   const checked = items.filter(i => i.checked).length;
@@ -46,12 +48,24 @@ export default function LuggageTab({ trip, upTrip, tpls, setTpls }: LuggageTabPr
   }
 
   function addItem() {
-    if (!newItem.trim()) return;
+    const raw = itemInputRef.current?.value ?? newItem;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    setNewItem('');
+    if (itemInputRef.current) itemInputRef.current.value = '';
     upTrip(t => ({
       ...t,
-      luggage: [...(t.luggage || []), { id: uid(), name: newItem.trim(), checked: false }],
+      luggage: [...(t.luggage || []), { id: uid(), name: trimmed, checked: false }],
     }));
-    setNewItem('');
+  }
+
+  function addTpl() {
+    const raw = tplInputRef.current?.value ?? newTpl;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    setNewTpl('');
+    if (tplInputRef.current) tplInputRef.current.value = '';
+    setTpls([...tpls, trimmed]);
   }
 
   function delItem(id: string) {
@@ -85,12 +99,13 @@ export default function LuggageTab({ trip, upTrip, tpls, setTpls }: LuggageTabPr
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
         <input
+          ref={itemInputRef}
           style={{ ...Sty.inp, flex: 1 }}
           value={newItem}
           onChange={e => setNewItem(e.target.value)}
           placeholder="新增行李項目"
           onKeyDown={e => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) {
               e.preventDefault();
               addItem();
             }
@@ -176,28 +191,19 @@ export default function LuggageTab({ trip, upTrip, tpls, setTpls }: LuggageTabPr
           </p>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
             <input
+              ref={tplInputRef}
               style={{ ...Sty.inp, flex: 1 }}
               value={newTpl}
               onChange={e => setNewTpl(e.target.value)}
               placeholder="新增模板項目"
               onKeyDown={e => {
-                if (e.key === 'Enter' && newTpl.trim()) {
+                if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) {
                   e.preventDefault();
-                  setTpls([...tpls, newTpl.trim()]);
-                  setNewTpl('');
+                  addTpl();
                 }
               }}
             />
-            <Button
-              variant="pri"
-              size="small"
-              onClick={() => {
-                if (newTpl.trim()) {
-                  setTpls([...tpls, newTpl.trim()]);
-                  setNewTpl('');
-                }
-              }}
-            >
+            <Button variant="pri" size="small" onClick={addTpl}>
               新增
             </Button>
           </div>

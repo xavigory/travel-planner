@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, DragEvent } from 'react';
 import { Trip, ItineraryItem } from '../../types';
 import { getDays, safeStr, uid } from '../../utils/helpers';
 import { colors } from '../../constants/colors';
@@ -42,19 +42,77 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
   const [ctx, setCtx] = useState<any>(null);
   const [dragOverDay, setDragOverDay] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const dragRef = useRef<{ ds: string; id: string } | null>(null);
+  const [panelPos, setPanelPos] = useState<number | null>(null);
+  const [dragOverPanelIdx, setDragOverPanelIdx] = useState<number | null>(null);
+  const dragRef = useRef<{ ds: string; id: string; isAuto: boolean } | null>(null);
+  const isPanelDrag = useRef(false);
+
+  function getOrder(t: Trip, ds: string): string[] {
+    return (t.dayOrder && t.dayOrder[ds]) || [];
+  }
+
+  function setOrder(t: Trip, ds: string, order: string[]): Trip {
+    return { ...t, dayOrder: { ...(t.dayOrder || {}), [ds]: order } };
+  }
 
   function reorder(ds: string, fromId: string, toId: string) {
     if (fromId === toId) return;
     upTrip(t => {
-      const arr = [...((t.itinerary || {})[ds] || [])];
-      const fi = arr.findIndex(x => x.id === fromId);
-      const ti = arr.findIndex(x => x.id === toId);
+      const seq = computeSeq(t, ds);
+      const order = seq.slice();
+      const fi = order.indexOf(fromId);
+      const ti = order.indexOf(toId);
       if (fi < 0 || ti < 0) return t;
-      const [m] = arr.splice(fi, 1);
-      arr.splice(ti, 0, m);
-      return { ...t, itinerary: { ...t.itinerary, [ds]: arr } };
+      const [m] = order.splice(fi, 1);
+      order.splice(ti, 0, m);
+      return setOrder(t, ds, order);
     });
+  }
+
+  function moveAcrossDays(fromDs: string, toDs: string, itemId: string, beforeId?: string) {
+    if (fromDs === toDs) return;
+    upTrip(t => {
+      const fromArr = [...((t.itinerary || {})[fromDs] || [])];
+      const idx = fromArr.findIndex(x => x.id === itemId);
+      if (idx < 0) return t;
+      const [moved] = fromArr.splice(idx, 1);
+      const toArr = [...((t.itinerary || {})[toDs] || []), moved];
+
+      const fromOrder = ((t.dayOrder || {})[fromDs] || []).filter(id => id !== itemId);
+      const toOrder = [...((t.dayOrder || {})[toDs] || [])];
+      if (beforeId) {
+        const at = toOrder.indexOf(beforeId);
+        if (at >= 0) toOrder.splice(at, 0, itemId);
+        else toOrder.push(itemId);
+      } else {
+        toOrder.push(itemId);
+      }
+      return {
+        ...t,
+        itinerary: { ...t.itinerary, [fromDs]: fromArr, [toDs]: toArr },
+        dayOrder: { ...(t.dayOrder || {}), [fromDs]: fromOrder, [toDs]: toOrder },
+      };
+    });
+  }
+
+  function computeSeq(t: Trip, ds: string): string[] {
+    // build the canonical id list for the day (auto items + user items)
+    const ids: string[] = [];
+    (t.accommodations || []).forEach(a => {
+      if (a.checkIn === ds) ids.push('ai' + a.id);
+      if (a.checkOut === ds) ids.push('ao' + a.id);
+    });
+    (t.transports || []).forEach(tr => {
+      if (tr.date === ds) ids.push('tr' + tr.id);
+    });
+    ((t.itinerary || {})[ds] || []).forEach(it => ids.push(it.id));
+    const stored = getOrder(t, ds);
+    if (!stored.length) return ids;
+    const known = new Set(ids);
+    const ordered = stored.filter(id => known.has(id));
+    const orderedSet = new Set(ordered);
+    const newcomers = ids.filter(id => !orderedSet.has(id));
+    return [...ordered, ...newcomers];
   }
 
   const days = getDays(trip.startDate, trip.endDate);
@@ -153,58 +211,101 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
     }));
   }
 
+  const ChipPanel = unplaced.length > 0 ? (
+    <div
+      draggable
+      onDragStart={e => {
+        isPanelDrag.current = true;
+        e.dataTransfer.setData('chipPanel', '1');
+      }}
+      onDragEnd={() => {
+        isPanelDrag.current = false;
+        setDragOverPanelIdx(null);
+      }}
+      style={{
+        ...Sty.card,
+        marginBottom: 14,
+        border: `1.5px solid ${colors.violetMid}`,
+        cursor: 'grab',
+      }}
+    >
+      <div style={{ padding: '12px 14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 14, color: colors.cloud, cursor: 'grab' }}>⠿</span>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              color: colors.coral,
+            }}
+          >
+            📍 拖曳景點加入行程（可移動此面板）
+          </span>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {unplaced.map(a => (
+            <div
+              key={a.id}
+              draggable
+              onDragStart={e => {
+                e.stopPropagation();
+                e.dataTransfer.setData('attrId', a.id);
+                isPanelDrag.current = false;
+              }}
+              style={{
+                padding: '5px 14px',
+                borderRadius: 999,
+                border: `1.5px solid ${colors.violetMid}`,
+                background: colors.violetLight,
+                cursor: 'grab',
+                fontSize: 12,
+                fontWeight: 600,
+                userSelect: 'none',
+                color: colors.violetDark,
+              }}
+            >
+              📍 {safeStr(a.name)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  function PanelDropZone({ idx }: { idx: number }) {
+    const isOver = dragOverPanelIdx === idx;
+    return (
+      <div
+        onDragOver={e => {
+          if (isPanelDrag.current) {
+            e.preventDefault();
+            setDragOverPanelIdx(idx);
+          }
+        }}
+        onDragLeave={() => setDragOverPanelIdx(null)}
+        onDrop={e => {
+          if (e.dataTransfer.getData('chipPanel') === '1') {
+            e.preventDefault();
+            setPanelPos(idx);
+            setDragOverPanelIdx(null);
+          }
+        }}
+        style={{
+          height: isOver ? 12 : 6,
+          background: isOver ? colors.coral : 'transparent',
+          borderRadius: 4,
+          marginBottom: isOver ? 8 : 2,
+          transition: 'all .15s',
+        }}
+      />
+    );
+  }
+
   return (
     <div>
-      {unplaced.length > 0 && (
-        <div
-          style={{
-            ...Sty.card,
-            marginBottom: 14,
-            border: `1.5px solid ${colors.violetMid}`,
-          }}
-        >
-          <div style={{ padding: '12px 14px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-              <span style={{ fontSize: 14, color: colors.cloud, cursor: 'grab' }}>⠿</span>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: colors.coral,
-                }}
-              >
-                📍 拖曳景點加入行程
-              </span>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {unplaced.map(a => (
-                <div
-                  key={a.id}
-                  draggable
-                  onDragStart={e => {
-                    e.dataTransfer?.setData('attrId', a.id);
-                  }}
-                  style={{
-                    padding: '5px 14px',
-                    borderRadius: 999,
-                    border: `1.5px solid ${colors.violetMid}`,
-                    background: colors.violetLight,
-                    cursor: 'grab',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    userSelect: 'none',
-                    color: colors.violetDark,
-                  }}
-                >
-                  📍 {safeStr(a.name)}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      {unplaced.length > 0 && panelPos === null && ChipPanel}
 
       {days.length === 0 && (
         <p style={{ color: colors.mist, fontSize: 14 }}>請先設定旅行日期</p>
@@ -222,42 +323,15 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
         const open = col[ds] !== true;
         const autoItms = autoItems(ds);
         const uitms = uItems(ds);
+        const autoMap = new Map<string, any>(autoItms.map(it => [it.id, it]));
+        const userMap = new Map<string, ItineraryItem>(uitms.map(it => [it.id, it]));
+        const seq = computeSeq(trip, ds);
         const total = autoItms.length + uitms.length;
         const isOver = dragOverDay === ds;
         return (
           <div key={ds}>
-            {unplaced.length > 0 && i === 0 && (
-              <div
-                style={{
-                  height: dragOverDay === `drop-${i}` ? 16 : 8,
-                  background: dragOverDay === `drop-${i}` ? colors.coral : 'transparent',
-                  borderRadius: 4,
-                  marginBottom: 8,
-                  transition: 'all .15s',
-                }}
-                onDragOver={e => {
-                  e.preventDefault();
-                  setDragOverDay(`drop-${i}`);
-                }}
-                onDragLeave={() => setDragOverDay(null)}
-                onDrop={e => {
-                  e.preventDefault();
-                  const attrId = e.dataTransfer?.getData('attrId');
-                  if (attrId && ds) {
-                    const attr = attrs.find(a => a.id === attrId);
-                    if (attr) {
-                      addItem(ds, {
-                        time: '',
-                        name: safeStr(attr.name),
-                        note: '',
-                        attrId: attr.id,
-                      });
-                    }
-                  }
-                  setDragOverDay(null);
-                }}
-              />
-            )}
+            {unplaced.length > 0 && <PanelDropZone idx={i} />}
+            {unplaced.length > 0 && panelPos === i && ChipPanel}
             <div
               style={{
                 ...Sty.card,
@@ -266,12 +340,32 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
                 background: isOver ? '#fff8f6' : colors.white,
               }}
               onDragOver={e => {
+                if (isPanelDrag.current) return;
+                // auto items 不可跨天
+                if (dragRef.current && dragRef.current.isAuto && dragRef.current.ds !== ds) return;
                 e.preventDefault();
                 setDragOverDay(ds);
               }}
               onDragLeave={() => setDragOverDay(null)}
               onDrop={e => {
+                if (isPanelDrag.current) {
+                  setDragOverDay(null);
+                  return;
+                }
                 e.preventDefault();
+
+                // 跨天移動景點到此天末尾
+                if (
+                  dragRef.current &&
+                  dragRef.current.ds !== ds &&
+                  !dragRef.current.isAuto
+                ) {
+                  moveAcrossDays(dragRef.current.ds, ds, dragRef.current.id);
+                  dragRef.current = null;
+                  setDragOverDay(null);
+                  return;
+                }
+
                 const attrId = e.dataTransfer?.getData('attrId');
                 if (attrId) {
                   const attr = attrs.find(a => a.id === attrId);
@@ -319,124 +413,171 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
               </div>
               {open && (
                 <div style={{ padding: '10px 14px' }}>
-                  {autoItms.map(item => (
-                    <div
-                      key={item.id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: 8,
-                        padding: '6px 0',
-                        borderBottom: `1px solid ${colors.fog}`,
-                      }}
-                    >
-                      <span style={{ fontSize: 12, color: colors.mist, minWidth: 42, paddingTop: 2 }}>
-                        {item.time || '--:--'}
-                      </span>
-                      <span style={{ fontSize: 13, color: colors.ink, flex: 1 }}>
-                        {item.name}
-                      </span>
-                    </div>
-                  ))}
-                  {uitms.map(item => {
+                  {seq.map(id => {
+                    const auto = autoMap.get(id);
+                    const user = userMap.get(id);
+                    if (!auto && !user) return null;
                     const isDragging =
-                      dragRef.current?.ds === ds && dragRef.current?.id === item.id;
-                    const isDropTarget = dropTargetId === item.id;
-                    return (
-                    <div
-                      key={item.id}
-                      draggable
-                      onDragStart={e => {
+                      dragRef.current?.ds === ds && dragRef.current?.id === id;
+                    const isDropTarget = dropTargetId === id;
+                    const isAuto = !!auto;
+                    const dragHandlers = {
+                      draggable: true,
+                      onDragStart: (e: DragEvent) => {
                         e.stopPropagation();
-                        e.dataTransfer.setData('reorder', item.id);
-                        dragRef.current = { ds, id: item.id };
-                      }}
-                      onDragOver={e => {
-                        if (dragRef.current) {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDropTargetId(item.id);
-                        }
-                      }}
-                      onDrop={e => {
+                        e.dataTransfer.setData('reorder', id);
+                        dragRef.current = { ds, id, isAuto };
+                        isPanelDrag.current = false;
+                      },
+                      onDragOver: (e: DragEvent) => {
+                        if (!dragRef.current) return;
+                        // auto items 不可跨天
+                        if (dragRef.current.isAuto && dragRef.current.ds !== ds) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropTargetId(id);
+                      },
+                      onDrop: (e: DragEvent) => {
                         e.stopPropagation();
                         e.preventDefault();
-                        if (dragRef.current && dragRef.current.ds === ds) {
-                          reorder(ds, dragRef.current.id, item.id);
+                        if (dragRef.current) {
+                          if (dragRef.current.ds === ds) {
+                            // 同天 reorder
+                            reorder(ds, dragRef.current.id, id);
+                          } else if (!dragRef.current.isAuto) {
+                            // 跨天移動景點到此位置之前
+                            moveAcrossDays(dragRef.current.ds, ds, dragRef.current.id, id);
+                          }
                         }
                         dragRef.current = null;
                         setDropTargetId(null);
-                      }}
-                      onDragEnd={() => {
+                      },
+                      onDragEnd: () => {
                         dragRef.current = null;
                         setDropTargetId(null);
-                      }}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: 8,
-                        padding: '7px 6px',
-                        marginBottom: 4,
-                        border: `1.5px solid ${
-                          isDropTarget ? colors.coral : colors.cloud
-                        }`,
-                        borderRadius: 8,
-                        background: isDropTarget ? '#fff0ec' : colors.white,
-                        cursor: 'grab',
-                        opacity: isDragging ? 0.4 : 1,
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: 14,
-                          color: colors.cloud,
-                          flexShrink: 0,
-                          paddingTop: 1,
-                        }}
-                      >
-                        ⠿
-                      </span>
-                      <span
-                        style={{
-                          fontSize: 12,
-                          color: colors.mist,
-                          minWidth: 42,
-                          paddingTop: 2,
-                        }}
-                      >
-                        {item.time || '--:--'}
-                      </span>
-                      <div style={{ flex: 1 }}>
-                        <span style={{ fontSize: 13, color: colors.ink }}>
-                          {item.attrId ? '📍 ' : ''}
-                          {safeStr(item.name)}
-                        </span>
-                        {item.note && (
-                          <div style={{ fontSize: 12, color: colors.mist }}>
-                            {safeStr(item.note)}
-                          </div>
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <Button
-                          size="small"
-                          onClick={() => {
-                            setCtx({ ds, item });
-                            setModal('edit');
+                      },
+                    };
+                    if (auto) {
+                      return (
+                        <div
+                          key={id}
+                          {...dragHandlers}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: 8,
+                            padding: '7px 6px',
+                            marginBottom: 4,
+                            border: `1.5px solid ${
+                              isDropTarget ? colors.coral : 'transparent'
+                            }`,
+                            borderRadius: 8,
+                            background: isDropTarget ? '#fff0ec' : colors.white,
+                            cursor: 'grab',
+                            opacity: isDragging ? 0.4 : 1,
+                            borderBottom: isDropTarget
+                              ? `1.5px solid ${colors.coral}`
+                              : `1px solid ${colors.fog}`,
                           }}
                         >
-                          ✏️
-                        </Button>
-                        <Button
-                          variant="dan"
-                          size="small"
-                          onClick={() => delItem(ds, item.id)}
+                          <span
+                            style={{
+                              fontSize: 14,
+                              color: colors.cloud,
+                              flexShrink: 0,
+                              paddingTop: 1,
+                            }}
+                          >
+                            ⠿
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 12,
+                              color: colors.mist,
+                              minWidth: 42,
+                              paddingTop: 2,
+                            }}
+                          >
+                            {auto.time || '--:--'}
+                          </span>
+                          <span style={{ fontSize: 13, color: colors.ink, flex: 1 }}>
+                            {auto.name}
+                          </span>
+                        </div>
+                      );
+                    }
+                    const item = user!;
+                    return (
+                      <div
+                        key={id}
+                        {...dragHandlers}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: 8,
+                          padding: '7px 6px',
+                          marginBottom: 4,
+                          border: `1.5px solid ${
+                            isDropTarget ? colors.coral : colors.cloud
+                          }`,
+                          borderRadius: 8,
+                          background: isDropTarget ? '#fff0ec' : colors.white,
+                          cursor: 'grab',
+                          opacity: isDragging ? 0.4 : 1,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 14,
+                            color: colors.cloud,
+                            flexShrink: 0,
+                            paddingTop: 1,
+                          }}
                         >
-                          ✕
-                        </Button>
+                          ⠿
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: colors.mist,
+                            minWidth: 42,
+                            paddingTop: 2,
+                          }}
+                        >
+                          {item.time || '--:--'}
+                        </span>
+                        <div style={{ flex: 1 }}>
+                          <span style={{ fontSize: 13, color: colors.ink }}>
+                            {item.attrId ? '📍 ' : ''}
+                            {safeStr(item.name)}
+                          </span>
+                          {item.note && (
+                            <div style={{ fontSize: 12, color: colors.mist }}>
+                              {safeStr(item.note)}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <Button
+                            size="small"
+                            onClick={() => {
+                              setCtx({ ds, item });
+                              setModal('edit');
+                            }}
+                          >
+                            ✏️
+                          </Button>
+                          <Button
+                            variant="dan"
+                            size="small"
+                            onClick={() => delItem(ds, item.id)}
+                          >
+                            ✕
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {isOver && (
                     <div
                       style={{
@@ -463,44 +604,15 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
                 </div>
               )}
             </div>
-            {unplaced.length > 0 && i < days.length - 1 && (
-              <div
-                style={{
-                  height: 8,
-                  background: dragOverDay === `drop-${i + 1}` ? colors.coral : 'transparent',
-                  borderRadius: 4,
-                  marginBottom: 8,
-                  marginTop: 8,
-                  transition: 'all .15s',
-                  cursor: 'pointer',
-                }}
-                onDragOver={e => {
-                  e.preventDefault();
-                  setDragOverDay(`drop-${i + 1}`);
-                }}
-                onDragLeave={() => setDragOverDay(null)}
-                onDrop={e => {
-                  e.preventDefault();
-                  const nextDay = days[i + 1];
-                  const attrId = e.dataTransfer?.getData('attrId');
-                  if (attrId && nextDay) {
-                    const attr = attrs.find(a => a.id === attrId);
-                    if (attr) {
-                      addItem(nextDay, {
-                        time: '',
-                        name: safeStr(attr.name),
-                        note: '',
-                        attrId: attr.id,
-                      });
-                    }
-                  }
-                  setDragOverDay(null);
-                }}
-              />
-            )}
           </div>
         );
       })}
+      {unplaced.length > 0 && days.length > 0 && (
+        <>
+          <PanelDropZone idx={days.length} />
+          {panelPos === days.length && ChipPanel}
+        </>
+      )}
 
       {modal === 'add' && ctx && (
         <ItinItemModal

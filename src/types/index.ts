@@ -18,6 +18,8 @@ export interface Trip {
   transports: Transport[];
   expenses: Expense[];
   luggage: LuggageItem[];
+  dayOrder?: Record<string, string[]>;
+  collabId?: string;
 }
 
 export interface ItineraryItem {
