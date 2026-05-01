@@ -59,6 +59,7 @@ export default function App() {
   const [tab, setTab] = useState(0);
   const [modal, setModal] = useState<string | null>(null);
   const [editTripId, setEditTripId] = useState<string | null>(null);
+  const [deleteTripId, setDeleteTripId] = useState<string | null>(null);
   const [showMemo, setShowMemo] = useState(false);
 
   // 協作狀態：客人透過連結進入時使用（不存 localStorage）
@@ -71,20 +72,41 @@ export default function App() {
   const [copied, setCopied] = useState(false);
 
   // 本地行程訂閱清理函式（有 collabId 的行程）
-  const localSubsRef = useRef<Record<string, () => void>>({});
-  // 防止 Firestore onSnapshot 觸發自己寫入的迴圈
-  const remoteUpdateRef = useRef(false);
+  // guestTrip 的 ref，讓 upGuestTrip 能讀取最新值而不在 updater 中產生副作用
+  const guestTripRef = useRef<Trip | null>(null);
+  // Map 式訂閱管理：collabId → unsubscribe fn
+  const activeSubsRef = useRef<Map<string, () => void>>(new Map());
 
   // 監聽 Firebase 登入狀態
   useEffect(() => {
     return onAuthChange(async user => {
       setAuthUser(user);
       if (user) {
-        // 登入後：從 Firestore 載入用戶資料，若無則保留本地資料
         const cloud = await loadUserData(user.uid);
         if (cloud) {
           const sanitized = sanitizeData(cloud);
-          if (sanitized) setData(sanitized);
+          if (sanitized) {
+            setData(prev => {
+              // 合併策略：個人 Firestore 可能比協作訂閱更舊（race condition）
+              // 對有 collabId 的行程：若 prev 已有訂閱帶來的版本，保留它；否則用個人 Firestore 版本
+              const cloudById = new Map(sanitized.trips.map((t: Trip) => [t.id, t]));
+              const prevById = new Map(prev.trips.map((t: Trip) => [t.id, t]));
+
+              const trips: Trip[] = sanitized.trips.map((ct: Trip) => {
+                if (!ct.collabId) return ct;
+                const prevTrip = prevById.get(ct.id);
+                // prevTrip 存在且有 collabId 代表訂閱已更新它，優先使用
+                return (prevTrip?.collabId) ? prevTrip : ct;
+              });
+
+              // 保留 prev 中有但個人 Firestore 尚未收錄的行程（例如剛新增的）
+              prev.trips.forEach(t => {
+                if (!cloudById.has(t.id)) trips.push(t);
+              });
+
+              return { ...sanitized, trips };
+            });
+          }
         }
       }
     });
@@ -95,6 +117,11 @@ export default function App() {
     if (!authUser || authUser === 'loading') return;
     saveUserData(authUser.uid, data);
   }, [data, authUser]);
+
+  // 讓 guestTripRef 永遠跟 guestTrip state 同步
+  if (guestTrip && typeof guestTrip === 'object') {
+    guestTripRef.current = guestTrip;
+  }
 
   // 偵測 ?trip= URL → 客人模式
   useEffect(() => {
@@ -109,39 +136,59 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 訂閱本地帶 collabId 的行程（接收朋友的修改）
+  // 訂閱本地所有有 collabId 的行程（接收朋友的修改）
+  // 用 Map 做增量管理：只在 collabId 集合真正改變時新增/移除訂閱
+  const collabIdsKey = [...new Set(
+    data.trips.filter(t => t.collabId).map(t => t.collabId!)
+  )].sort().join('|');
+
   useEffect(() => {
-    const subs = localSubsRef.current;
-    // 找出有 collabId 的行程
-    data.trips.forEach(t => {
-      if (!t.collabId || subs[t.collabId]) return;
-      subs[t.collabId] = subscribeTrip(
-        t.collabId,
-        remote => {
-          remoteUpdateRef.current = true;
-          setData(d => ({
-            ...d,
-            trips: d.trips.map(x =>
-              x.collabId === remote.collabId ? { ...remote, id: x.id } : x
-            ),
-          }));
-        },
-        () => {},
-      );
-    });
-    // 清理已移除行程的訂閱
-    Object.keys(subs).forEach(cid => {
-      if (!data.trips.find(t => t.collabId === cid)) {
-        subs[cid]();
-        delete subs[cid];
+    const currentIds = new Set(
+      data.trips.filter(t => t.collabId).map(t => t.collabId!)
+    );
+    const subs = activeSubsRef.current;
+
+    // 移除不再存在的訂閱
+    subs.forEach((unsub, cid) => {
+      if (!currentIds.has(cid)) {
+        console.log('[collab] 取消訂閱', cid);
+        unsub();
+        subs.delete(cid);
       }
     });
-  }, [data.trips.map(t => t.collabId).join(',')]);
 
-  // 清理所有訂閱
+    // 新增尚未訂閱的 collabId
+    currentIds.forEach(collabId => {
+      if (!subs.has(collabId)) {
+        console.log('[collab] 建立訂閱', collabId);
+        subs.set(
+          collabId,
+          subscribeTrip(
+            collabId,
+            remote => {
+              console.log('[collab] 收到更新', collabId, remote);
+              setData(d => ({
+                ...d,
+                trips: d.trips.map(x =>
+                  x.collabId === remote.collabId ? { ...remote, id: x.id } : x
+                ),
+              }));
+            },
+            () => console.warn('[collab] 訂閱錯誤', collabId),
+          )
+        );
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabIdsKey]);
+
+  // 離開頁面時清除全部訂閱，並清空 Map
+  // ★ 清空 Map 是關鍵：React Strict Mode 模擬 unmount 後若 Map 不清空，
+  //   重新 mount 時 subs.has(collabId) 仍為 true，導致訂閱無法重建
   useEffect(() => {
     return () => {
-      Object.values(localSubsRef.current).forEach(u => u());
+      activeSubsRef.current.forEach(u => u());
+      activeSubsRef.current.clear();
     };
   }, []);
 
@@ -150,22 +197,20 @@ export default function App() {
     setData(d => {
       const trips = d.trips.map(t => (t.id === id ? fn(t) : t));
       const updated = trips.find(t => t.id === id);
-      if (updated?.collabId && !remoteUpdateRef.current) {
-        syncTrip(updated.collabId, updated);
-      }
-      remoteUpdateRef.current = false;
+      // onSnapshot 不會呼叫 upTrip，所以這裡不需要防循環 flag
+      if (updated?.collabId) syncTrip(updated.collabId, updated);
       return { ...d, trips };
     });
   }
 
-  /** 客人模式：upTrip 直接寫 Firestore */
+  /** 客人模式：透過 ref 讀最新值，避免在 setState updater 裡產生副作用 */
   function upGuestTrip(fn: (t: Trip) => Trip) {
-    setGuestTrip(cur => {
-      if (!cur || typeof cur !== 'object') return cur;
-      const updated = fn(cur);
-      if (updated.collabId) syncTrip(updated.collabId, updated);
-      return updated;
-    });
+    const cur = guestTripRef.current;
+    if (!cur) return;
+    const updated = fn(cur);
+    guestTripRef.current = updated;
+    setGuestTrip(updated);
+    if (updated.collabId) syncTrip(updated.collabId, updated);
   }
 
   const trip = sel ? data.trips.find(t => t.id === sel) || null : null;
@@ -499,6 +544,13 @@ export default function App() {
                         >
                           ✏️ 編輯
                         </Button>
+                        <Button
+                          variant="dan"
+                          size="small"
+                          onClick={() => setDeleteTripId(t.id)}
+                        >
+                          ✕
+                        </Button>
                       </div>
                     </div>
                   </div>
@@ -506,6 +558,31 @@ export default function App() {
               );
             })}
           </div>
+
+          {/* 刪除確認 Modal */}
+          {deleteTripId && (() => {
+            const target = data.trips.find(t => t.id === deleteTripId);
+            return (
+              <Modal title="確認刪除" onClose={() => setDeleteTripId(null)}>
+                <p style={{ fontSize: 14, color: colors.slate, marginBottom: 20 }}>
+                  確定要刪除「<strong>{target ? tripName(target) : ''}</strong>」嗎？<br />
+                  <span style={{ fontSize: 13, color: colors.danger }}>此操作無法復原。</span>
+                </p>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <Button onClick={() => setDeleteTripId(null)}>取消</Button>
+                  <Button
+                    variant="dan"
+                    onClick={() => {
+                      setData(d => ({ ...d, trips: d.trips.filter(t => t.id !== deleteTripId) }));
+                      setDeleteTripId(null);
+                    }}
+                  >
+                    確認刪除
+                  </Button>
+                </div>
+              </Modal>
+            );
+          })()}
 
           {/* 協作連結 Modal */}
           {modal === 'collab' && (
