@@ -2,6 +2,7 @@ import { STORAGE_KEY } from '../constants/data';
 import { AppData } from '../types';
 import { db } from '../firebase/config';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { stripUndefined } from './helpers';
 
 // ── localStorage（本地快取） ──────────────────────────────────
 
@@ -37,15 +38,31 @@ export async function loadUserData(uid: string): Promise<AppData | null> {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** debounce 1s，防止每次按鍵都寫入 Firestore */
-export function saveUserData(uid: string, data: AppData): void {
-  // 同步到 localStorage
+/** 立即將資料寫入 Firestore（不 debounce） */
+export async function saveUserDataNow(uid: string, data: AppData): Promise<void> {
   saveData(data);
-  // debounce 寫到 Firestore
+  try {
+    await setDoc(userDoc(uid), stripUndefined(data));
+  } catch (e) {
+    console.error('[storage] Firestore 寫入失敗', e);
+  }
+}
+
+/** debounce 500ms 寫入 Firestore（適用頻繁操作如輸入文字），localStorage 立即更新 */
+export function saveUserData(uid: string, data: AppData): void {
+  saveData(data);
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    try {
-      await setDoc(userDoc(uid), data);
-    } catch {}
-  }, 1000);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveUserDataNow(uid, data);
+  }, 500);
+}
+
+/** 清空 pending 的 debounce timer，立即寫入 */
+export async function flushUserData(uid: string, data: AppData): Promise<void> {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  await saveUserDataNow(uid, data);
 }

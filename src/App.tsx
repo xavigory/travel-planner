@@ -3,7 +3,7 @@ import { AppData, Trip } from './types';
 import { colors } from './constants/colors';
 import { fonts } from './constants/fonts';
 import { DEF_PACK, TABS } from './constants/data';
-import { loadData, loadUserData, saveUserData } from './utils/storage';
+import { loadData, loadUserData, saveUserData, saveUserDataNow } from './utils/storage';
 import { sanitizeData, uid, getDays } from './utils/helpers';
 import { collectReminders } from './utils/reminders';
 import { onAuthChange, signInWithGoogle, signOut, User } from './utils/auth';
@@ -93,10 +93,29 @@ export default function App() {
               const prevById = new Map(prev.trips.map((t: Trip) => [t.id, t]));
 
               const trips: Trip[] = sanitized.trips.map((ct: Trip) => {
-                if (!ct.collabId) return ct;
                 const prevTrip = prevById.get(ct.id);
-                // prevTrip 存在且有 collabId 代表訂閱已更新它，優先使用
-                return (prevTrip?.collabId) ? prevTrip : ct;
+
+                // 協作行程：訂閱已更新則優先使用 prev
+                if (ct.collabId && prevTrip?.collabId) return prevTrip;
+
+                // 非協作行程：合併 attractions 的查詢結果
+                // Firestore 有 1 秒 debounce，刷新太快時 cloud 可能還是舊的
+                // 規則：若 prev 的 attraction 已有查詢資料（queryOk: true）
+                //        而 cloud 對應的 attraction 尚未查詢過，保留 prev 的版本
+                if (prevTrip && prevTrip.attractions?.length) {
+                  const prevAttrById = new Map(
+                    prevTrip.attractions.map(a => [a.id, a])
+                  );
+                  const mergedAttractions = (ct.attractions || []).map(ca => {
+                    const pa = prevAttrById.get(ca.id);
+                    // prev 有查詢過、cloud 還沒有 → 保留 prev 的 attraction
+                    if (pa?.queryOk === true && !ca.queryOk) return pa;
+                    return ca;
+                  });
+                  return { ...ct, attractions: mergedAttractions };
+                }
+
+                return ct;
               });
 
               // 保留 prev 中有但個人 Firestore 尚未收錄的行程（例如剛新增的）
@@ -117,6 +136,7 @@ export default function App() {
     if (!authUser || authUser === 'loading') return;
     saveUserData(authUser.uid, data);
   }, [data, authUser]);
+
 
   // 讓 guestTripRef 永遠跟 guestTrip state 同步
   if (guestTrip && typeof guestTrip === 'object') {
@@ -192,15 +212,21 @@ export default function App() {
     };
   }, []);
 
-  /** 更新本地行程，若有 collabId 同步到 Firestore */
+  /** 更新本地行程，若有 collabId 同步到 Firestore；同時立即寫入個人 Firestore */
   function upTrip(id: string, fn: (t: Trip) => Trip) {
+    // updater 同步執行，next 可在 setData 返回後立即取得
+    let next: AppData | null = null;
     setData(d => {
       const trips = d.trips.map(t => (t.id === id ? fn(t) : t));
       const updated = trips.find(t => t.id === id);
-      // onSnapshot 不會呼叫 upTrip，所以這裡不需要防循環 flag
       if (updated?.collabId) syncTrip(updated.collabId, updated);
-      return { ...d, trips };
+      next = { ...d, trips };
+      return next;
     });
+    // 直接寫入，不等 useEffect，確保資料立即持久化
+    if (next !== null && authUser && typeof authUser === 'object') {
+      saveUserDataNow(authUser.uid, next);
+    }
   }
 
   /** 客人模式：透過 ref 讀最新值，避免在 setState updater 裡產生副作用 */

@@ -8,6 +8,7 @@ import {
   Unsubscribe,
 } from 'firebase/firestore';
 import { Trip } from '../types';
+import { stripUndefined } from './helpers';
 
 function genId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -18,7 +19,7 @@ export async function pushTrip(trip: Trip): Promise<string> {
   const collabId = genId();
   const { collabId: _c, ...rest } = trip;
   await setDoc(doc(db, 'trips', collabId), {
-    ...rest,
+    ...stripUndefined(rest),
     _updatedAt: serverTimestamp(),
   });
   return collabId;
@@ -32,17 +33,11 @@ export function syncTrip(collabId: string, trip: Trip): void {
   clearTimeout(timers[collabId]);
   timers[collabId] = setTimeout(async () => {
     const { collabId: _c, ...rest } = trip;
+    const clean = { ...stripUndefined(rest), _updatedAt: serverTimestamp() };
     try {
-      await updateDoc(doc(db, 'trips', collabId), {
-        ...rest,
-        _updatedAt: serverTimestamp(),
-      });
+      await updateDoc(doc(db, 'trips', collabId), clean);
     } catch {
-      // 文件不存在時改用 setDoc
-      await setDoc(doc(db, 'trips', collabId), {
-        ...rest,
-        _updatedAt: serverTimestamp(),
-      });
+      await setDoc(doc(db, 'trips', collabId), clean);
     }
   }, 500);
 }

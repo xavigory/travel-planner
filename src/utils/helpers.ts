@@ -38,6 +38,19 @@ export function cancelLeft(dateStr: string | null | undefined): number | null {
   return Math.round((targetDate.getTime() - today.getTime()) / 86400000);
 }
 
+/** 遞迴移除物件中所有 undefined 欄位（Firestore 不接受 undefined） */
+export function stripUndefined<T>(v: T): T {
+  if (Array.isArray(v)) return v.map(stripUndefined) as unknown as T;
+  if (v !== null && typeof v === 'object') {
+    return Object.fromEntries(
+      Object.entries(v as object)
+        .filter(([, val]) => val !== undefined)
+        .map(([key, val]) => [key, stripUndefined(val)])
+    ) as T;
+  }
+  return v;
+}
+
 export function sanitizeAttr(a: any): any {
   return {
     ...a,
