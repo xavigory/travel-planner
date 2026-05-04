@@ -3,6 +3,17 @@ export interface AppData {
   lugTpls: string[];
 }
 
+export type CollabRole = 'owner' | 'editor' | 'viewer';
+
+export interface CollabMember {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string;
+  role: CollabRole;
+  joinedAt: string;
+}
+
 export interface Trip {
   id: string;
   name: string;
@@ -20,6 +31,11 @@ export interface Trip {
   luggage: LuggageItem[];
   dayOrder?: Record<string, string[]>;
   collabId?: string;
+  ownerId?: string;
+  members?: Record<string, CollabMember>;
+  invitedEmails?: string[];
+  savedFromCollabId?: string;
+  shareId?: string;
 }
 
 export interface ItineraryItem {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { AppData, Trip } from './types';
+import { AppData, Trip, CollabRole } from './types';
 import { colors } from './constants/colors';
 import { fonts } from './constants/fonts';
 import { DEF_PACK, TABS } from './constants/data';
@@ -7,7 +7,7 @@ import { loadData, loadUserData, saveUserData, saveUserDataNow } from './utils/s
 import { sanitizeData, uid, getDays } from './utils/helpers';
 import { collectReminders } from './utils/reminders';
 import { onAuthChange, signInWithGoogle, signOut, User } from './utils/auth';
-import { pushTrip, syncTrip, subscribeTrip, buildCollabUrl, getCollabIdFromUrl } from './utils/share';
+import { pushTrip, syncTrip, subscribeTrip, buildCollabUrl, getCollabIdFromUrl, addMember, updateMemberRole, inviteMemberByEmail, removeMember, revokeInvite, repairOwnership } from './utils/share';
 import { Button } from './components/Button';
 import { Badge } from './components/Badge';
 import { Modal } from './components/Modal';
@@ -69,11 +69,21 @@ export default function App() {
   // 開啟協作連結的 modal 狀態
   const [collabUrl, setCollabUrl] = useState('');
   const [collabStatus, setCollabStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [collabTripId, setCollabTripId] = useState<string | null>(null);
+  const [collabIsOwner, setCollabIsOwner] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
+
 
   // 本地行程訂閱清理函式（有 collabId 的行程）
   // guestTrip 的 ref，讓 upGuestTrip 能讀取最新值而不在 updater 中產生副作用
   const guestTripRef = useRef<Trip | null>(null);
+  // authUser 的 ref，讓訂閱 callback（閉包）能讀到最新的登入狀態
+  const authUserRef = useRef(authUser);
+  // 紀錄已自動儲存過的 collabId（避免重複觸發 setData）
+  const collabAutoSavedRef = useRef<Set<string>>(new Set());
+  authUserRef.current = authUser;
   // Map 式訂閱管理：collabId → unsubscribe fn
   const activeSubsRef = useRef<Map<string, () => void>>(new Map());
 
@@ -187,6 +197,18 @@ export default function App() {
             collabId,
             remote => {
               console.log('[collab] 收到更新', collabId, remote);
+              const curUser = authUserRef.current;
+              const curUid = curUser && typeof curUser === 'object' ? curUser.uid : null;
+              const curEmail = curUser && typeof curUser === 'object' ? (curUser.email ?? '').toLowerCase() : '';
+              const authorized =
+                remote.ownerId === curUid ||
+                !!(curUid && remote.members?.[curUid]) ||
+                !!(curEmail && (remote.invitedEmails ?? []).includes(curEmail));
+              if (!authorized) {
+                // 被擁有者移除：從本地清單刪除此協作行程
+                setData(d => ({ ...d, trips: d.trips.filter(x => x.collabId !== remote.collabId) }));
+                return;
+              }
               setData(d => ({
                 ...d,
                 trips: d.trips.map(x =>
@@ -212,6 +234,39 @@ export default function App() {
     };
   }, []);
 
+  // 訪客訪問協作行程：驗證權限 → 自動加入 members → 自動同步到個人帳戶
+  useEffect(() => {
+    if (!guestTrip || guestTrip === 'loading' || guestTrip === 'error') return;
+    if (!authUser || authUser === 'loading') return;
+    if (!guestTrip.collabId) return;
+
+    const myUid = authUser.uid;
+    const myEmail = (authUser.email ?? '').toLowerCase();
+    const isOwner = guestTrip.ownerId === myUid;
+    const isAlreadyMember = !!guestTrip.members?.[myUid];
+    const isInvited = (guestTrip.invitedEmails ?? []).includes(myEmail);
+
+    if (!isOwner && !isAlreadyMember && !isInvited) return;
+    if (isOwner) return; // 擁有者本地已有行程，不需重複加入
+
+    // 加入 members
+    if (!isAlreadyMember) {
+      addMember(guestTrip.collabId, myUid, authUser).catch(e =>
+        console.warn('[collab] addMember failed', e)
+      );
+    }
+
+    // 自動同步協作行程到個人帳戶（含 collabId 保持即時同步）
+    const cid = guestTrip.collabId;
+    if (!collabAutoSavedRef.current.has(cid)) {
+      collabAutoSavedRef.current.add(cid);
+      setData(d => {
+        if (d.trips.some(t => t.collabId === cid)) return d;
+        return { ...d, trips: [...d.trips, { ...guestTrip, id: uid() }] };
+      });
+    }
+  }, [guestTrip, authUser]);
+
   /** 更新本地行程，若有 collabId 同步到 Firestore；同時立即寫入個人 Firestore */
   function upTrip(id: string, fn: (t: Trip) => Trip) {
     // updater 同步執行，next 可在 setData 返回後立即取得
@@ -227,6 +282,19 @@ export default function App() {
     if (next !== null && authUser && typeof authUser === 'object') {
       saveUserDataNow(authUser.uid, next);
     }
+  }
+
+  async function handleInvite(collabId: string) {
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email) return;
+    setInviteLoading(true);
+    try {
+      await inviteMemberByEmail(collabId, email);
+      setInviteEmail('');
+    } catch (e) {
+      console.warn('[invite]', e);
+    }
+    setInviteLoading(false);
   }
 
   /** 客人模式：透過 ref 讀最新值，避免在 setState updater 裡產生副作用 */
@@ -255,8 +323,182 @@ export default function App() {
     );
   }
 
-  // ── 登入頁面（未登入且非協作連結）──────────────────────────
-  if (!authUser && !getCollabIdFromUrl()) {
+  // ── 分享連結（?trip= URL 進入，支援未登入唯讀）──────────────
+  if (guestTrip === 'loading') {
+    return (
+      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', color: colors.mist }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>✈️</div>
+          <div style={{ fontSize: 16 }}>正在載入行程…</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (guestTrip === 'error') {
+    return (
+      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', color: colors.mist }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🔍</div>
+          <div style={{ fontSize: 16, marginBottom: 8 }}>找不到這份行程</div>
+          <div style={{ fontSize: 13, marginBottom: 20 }}>連結可能有誤，請再次確認</div>
+          <Button onClick={() => { window.location.href = window.location.pathname; }}>回首頁</Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (guestTrip && typeof guestTrip === 'object') {
+    const isLoggedIn = typeof authUser === 'object' && authUser !== null;
+    const myUid = isLoggedIn ? (authUser as User).uid : null;
+    const myEmail = isLoggedIn ? ((authUser as User).email ?? '').toLowerCase() : '';
+    const myMemberRole: CollabRole | undefined = myUid ? guestTrip.members?.[myUid]?.role : undefined;
+    const isMember = !!myMemberRole;
+    const isOwnerOfCollab = guestTrip.ownerId === myUid || myMemberRole === 'owner';
+    const isInvited = myEmail ? (guestTrip.invitedEmails ?? []).includes(myEmail) : false;
+    // 可編輯：正式成員（非 viewer）或已受邀待加入
+    const canEdit = (isMember && myMemberRole !== 'viewer') || isInvited;
+    const alreadySaved = isLoggedIn && data.trips.some(t =>
+      t.collabId === guestTrip.collabId || t.savedFromCollabId === guestTrip.collabId
+    );
+
+    const gt = guestTrip;
+    const gtDays = getDays(gt.startDate, gt.endDate);
+    // 成員/擁有者/已加入者看全部頁籤；未加入且非成員只看行程＆景點
+    const showAllTabs = isMember || isOwnerOfCollab || alreadySaved;
+    const effectiveGuestTab = showAllTabs ? guestTab : Math.min(guestTab, 1);
+
+    // 已加入的非成員：tabs 2-4 顯示個人副本資料（住宿/交通/花費為空），不顯示擁有者私人資訊
+    const tripForPrivateTabs: Trip = (alreadySaved && !isMember && !isOwnerOfCollab)
+      ? (data.trips.find(t => t.savedFromCollabId === gt.collabId)
+          ?? { ...gt, accommodations: [], transports: [], expenses: [], luggage: [] })
+      : gt;
+
+    function upGuestTripOrNoop(fn: (t: Trip) => Trip) {
+      if (!canEdit) return;
+      upGuestTrip(fn);
+    }
+
+    return (
+      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body }}>
+        <div style={{ maxWidth: 680, margin: '0 auto', padding: '16px 20px' }}>
+          {/* 橫幅：依登入 / 成員狀態顯示不同資訊 */}
+          <div style={{ background: colors.tealLight, border: `1.5px solid ${colors.teal}`, borderRadius: 12, padding: '12px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 20 }}>🔗</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: colors.tealDark }}>
+                分享的行程
+                {myMemberRole && (
+                  <span style={{ fontSize: 11, fontWeight: 600, borderRadius: 999, padding: '2px 8px', marginLeft: 6,
+                    background: myMemberRole === 'viewer' ? colors.cloud : colors.teal, color: colors.white }}>
+                    {myMemberRole === 'owner' ? '✦ 擁有者' : myMemberRole === 'editor' ? '✏️ 協作者' : '👁 查看'}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: colors.slate, marginTop: 2 }}>
+                {!isLoggedIn
+                  ? '請登入後可將行程加入你的帳戶'
+                  : canEdit
+                  ? '你的修改會即時同步給所有協作者'
+                  : isMember
+                  ? '你的權限為唯讀，無法修改此行程'
+                  : '唯讀預覽，可將行程複製到你的帳戶作個人使用'}
+              </div>
+            </div>
+            {/* 右側操作 */}
+            {!isLoggedIn ? (
+              <Button variant="teal" size="small" onClick={async () => { try { await signInWithGoogle(); } catch {} }}>
+                登入
+              </Button>
+            ) : isOwnerOfCollab ? (
+              <span style={{ fontSize: 12, color: colors.tealDark, fontWeight: 600 }}>✦ 擁有者</span>
+            ) : isMember ? (
+              <span style={{ fontSize: 12, color: colors.tealDark, fontWeight: 600 }}>✓ 已同步</span>
+            ) : alreadySaved ? (
+              <span style={{ fontSize: 12, color: colors.tealDark, fontWeight: 600 }}>✓ 已加入</span>
+            ) : (
+              <Button
+                variant="teal"
+                size="small"
+                onClick={() => {
+                  // 個人副本只保留行程規劃＆景點，其餘資料不複製
+                  setData(d => ({
+                    ...d,
+                    trips: [...d.trips, {
+                      id: uid(),
+                      name: gt.name,
+                      destination: gt.destination,
+                      startDate: gt.startDate,
+                      endDate: gt.endDate,
+                      currency: gt.currency,
+                      localCurrency: gt.localCurrency,
+                      memo: '',
+                      itinerary: gt.itinerary,
+                      attractions: gt.attractions,
+                      accommodations: [],
+                      transports: [],
+                      expenses: [],
+                      luggage: data.lugTpls.map(n => ({ id: uid(), name: n, checked: false })),
+                      dayOrder: gt.dayOrder,
+                      savedFromCollabId: gt.collabId,
+                    } as Trip],
+                  }));
+                }}
+              >
+                ＋ 加入我的行程
+              </Button>
+            )}
+          </div>
+
+          {/* 行程標題 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <Button size="small" onClick={() => { window.location.href = window.location.pathname; }}>
+              ← 我的行程
+            </Button>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: fonts.display, fontSize: 17, fontWeight: 500, color: colors.ink }}>
+                {tripName(gt)}
+              </div>
+              {gt.startDate && gt.endDate && (
+                <div style={{ fontSize: 12, color: colors.mist }}>
+                  {gt.startDate} ～ {gt.endDate} · {gtDays.length} 天
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 頁籤：成員/擁有者全部 5 個；其他人只有行程＆景點 */}
+          <div style={{ display: 'flex', background: colors.white, borderRadius: 14, border: '1px solid rgba(0,0,0,0.07)', padding: 4, marginBottom: 16, overflowX: 'auto', gap: 2 }}>
+            {(showAllTabs ? TABS : [TABS[0], TABS[1]]).map(([ic, lb], i) => (
+              <button
+                key={i}
+                onClick={() => setGuestTab(i)}
+                style={{ flex: 1, padding: '8px 10px', border: 'none', borderRadius: 10, background: i === effectiveGuestTab ? colors.coral : 'transparent', cursor: 'pointer', fontSize: 12, color: i === effectiveGuestTab ? colors.white : colors.mist, whiteSpace: 'nowrap', fontWeight: i === effectiveGuestTab ? 700 : 500, fontFamily: fonts.body, transition: 'all .15s', minWidth: 56 }}
+              >
+                {ic} {lb}
+              </button>
+            ))}
+          </div>
+
+          {effectiveGuestTab === 0 && <ItineraryTab trip={gt} upTrip={fn => upGuestTripOrNoop(fn)} readOnly={!canEdit} />}
+          {effectiveGuestTab === 1 && <AttractionsTab trip={gt} upTrip={fn => upGuestTripOrNoop(fn)} readOnly={!canEdit} />}
+          {showAllTabs && effectiveGuestTab === 2 && <AccomTransTab trip={tripForPrivateTabs} upTrip={fn => upGuestTripOrNoop(fn)} />}
+          {showAllTabs && effectiveGuestTab === 3 && <ExpensesTab trip={tripForPrivateTabs} upTrip={fn => upGuestTripOrNoop(fn)} />}
+          {showAllTabs && effectiveGuestTab === 4 && (
+            <LuggageTab
+              trip={tripForPrivateTabs}
+              upTrip={fn => upGuestTripOrNoop(fn)}
+              tpls={data.lugTpls}
+              setTpls={tpls => setData(d => ({ ...d, lugTpls: tpls }))}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── 登入頁面（未登入且非分享連結）──────────────────────────
+  if (!authUser) {
     return (
       <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div style={{ textAlign: 'center', maxWidth: 360, padding: '0 24px' }}>
@@ -317,111 +559,6 @@ export default function App() {
             你的行程資料只有你自己可以看到。<br />
             登入即代表你同意我們的使用條款。
           </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ── 客人協作模式（?trip= URL 進入）──────────────────────────
-  if (guestTrip === 'loading') {
-    return (
-      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: colors.mist }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>✈️</div>
-          <div style={{ fontSize: 16 }}>正在連接協作行程…</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (guestTrip === 'error') {
-    return (
-      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: colors.mist }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>🔍</div>
-          <div style={{ fontSize: 16, marginBottom: 8 }}>找不到這份協作行程</div>
-          <div style={{ fontSize: 13, marginBottom: 20 }}>連結可能有誤，請再次確認</div>
-          <Button onClick={() => { window.location.href = window.location.pathname; }}>回首頁</Button>
-        </div>
-      </div>
-    );
-  }
-
-  if (guestTrip && typeof guestTrip === 'object') {
-    const gt = guestTrip;
-    const gtDays = getDays(gt.startDate, gt.endDate);
-    const alreadySaved = data.trips.some(t => t.collabId === gt.collabId);
-    return (
-      <div style={{ minHeight: '100vh', background: colors.page, fontFamily: fonts.body }}>
-        <div style={{ maxWidth: 680, margin: '0 auto', padding: '16px 20px' }}>
-          {/* 協作提示橫幅 */}
-          <div style={{ background: colors.tealLight, border: `1.5px solid ${colors.teal}`, borderRadius: 12, padding: '12px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 20 }}>🤝</span>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: colors.tealDark }}>協作行程 — 即時同步</div>
-              <div style={{ fontSize: 12, color: colors.slate, marginTop: 2 }}>你的修改會即時同步給所有人，也可以新增到自己的行程清單</div>
-            </div>
-            {alreadySaved ? (
-              <span style={{ fontSize: 12, color: colors.tealDark, fontWeight: 600 }}>✓ 已加入</span>
-            ) : (
-              <Button
-                variant="teal"
-                size="small"
-                onClick={() => {
-                  setData(d => ({
-                    ...d,
-                    trips: [...d.trips, { ...gt, id: uid() }],
-                  }));
-                }}
-              >
-                ＋ 加入我的行程
-              </Button>
-            )}
-          </div>
-
-          {/* 行程標題 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <Button size="small" onClick={() => { window.location.href = window.location.pathname; }}>
-              ← 我的行程
-            </Button>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: fonts.display, fontSize: 17, fontWeight: 500, color: colors.ink }}>
-                {tripName(gt)}
-              </div>
-              {gt.startDate && gt.endDate && (
-                <div style={{ fontSize: 12, color: colors.mist }}>
-                  {gt.startDate} ～ {gt.endDate} · {gtDays.length} 天
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Tabs */}
-          <div style={{ display: 'flex', background: colors.white, borderRadius: 14, border: '1px solid rgba(0,0,0,0.07)', padding: 4, marginBottom: 16, overflowX: 'auto', gap: 2 }}>
-            {TABS.map(([ic, lb], i) => (
-              <button
-                key={i}
-                onClick={() => setGuestTab(i)}
-                style={{ flex: 1, padding: '8px 10px', border: 'none', borderRadius: 10, background: i === guestTab ? colors.coral : 'transparent', cursor: 'pointer', fontSize: 12, color: i === guestTab ? colors.white : colors.mist, whiteSpace: 'nowrap', fontWeight: i === guestTab ? 700 : 500, fontFamily: fonts.body, transition: 'all .15s', minWidth: 56 }}
-              >
-                {ic} {lb}
-              </button>
-            ))}
-          </div>
-
-          {/* 可編輯的 Tab 內容 */}
-          {guestTab === 0 && <ItineraryTab trip={gt} upTrip={fn => upGuestTrip(fn)} />}
-          {guestTab === 1 && <AttractionsTab trip={gt} upTrip={fn => upGuestTrip(fn)} />}
-          {guestTab === 2 && <AccomTransTab trip={gt} upTrip={fn => upGuestTrip(fn)} />}
-          {guestTab === 3 && <ExpensesTab trip={gt} upTrip={fn => upGuestTrip(fn)} />}
-          {guestTab === 4 && (
-            <LuggageTab
-              trip={gt}
-              upTrip={fn => upGuestTrip(fn)}
-              tpls={data.lugTpls}
-              setTpls={tpls => setData(d => ({ ...d, lugTpls: tpls }))}
-            />
-          )}
         </div>
       </div>
     );
@@ -539,21 +676,34 @@ export default function App() {
                           variant={t.collabId ? 'teal' : 'def'}
                           size="small"
                           onClick={async () => {
+                            const curUid = (authUser as User).uid;
+                            const curUser = authUser as User;
+                            // 沒有 ownership 資料（舊行程）→ 假定是擁有者
+                            const hasOwnerInfo = !!(t.ownerId || t.members?.[curUid]);
+                            const amOwner = !t.collabId ||
+                              !hasOwnerInfo ||
+                              t.ownerId === curUid ||
+                              t.members?.[curUid]?.role === 'owner';
+                            setCollabIsOwner(amOwner);
                             if (t.collabId) {
-                              // 已開啟協作，直接顯示連結
+                              setCollabTripId(t.id);
                               setCollabUrl(buildCollabUrl(t.collabId));
                               setCollabStatus('done');
                               setCopied(false);
                               setModal('collab');
+                              // 舊行程缺少 ownership 資料 → 靜默修復
+                              if (amOwner && (!t.ownerId || !t.members?.[curUid])) {
+                                repairOwnership(t.collabId, curUid, curUser).catch(() => {});
+                              }
                               return;
                             }
-                            // 第一次開啟協作
+                            setCollabTripId(t.id);
                             setCollabStatus('loading');
                             setCollabUrl('');
                             setCopied(false);
                             setModal('collab');
                             try {
-                              const cid = await pushTrip(t);
+                              const cid = await pushTrip(t, curUid, curUser);
                               upTrip(t.id, x => ({ ...x, collabId: cid }));
                               setCollabUrl(buildCollabUrl(cid));
                               setCollabStatus('done');
@@ -562,7 +712,7 @@ export default function App() {
                             }
                           }}
                         >
-                          {t.collabId ? '🔗 分享連結' : '🤝 開啟協作'}
+                          {t.collabId ? '🔗 分享與協作' : '🔗 分享與協作'}
                         </Button>
                         <Button
                           size="small"
@@ -611,49 +761,173 @@ export default function App() {
           })()}
 
           {/* 協作連結 Modal */}
-          {modal === 'collab' && (
-            <Modal title="🤝 協作行程" onClose={() => { setModal(null); setCollabStatus('idle'); }}>
-              {collabStatus === 'loading' && (
-                <div style={{ textAlign: 'center', padding: '24px 0', color: colors.mist }}>
-                  <div style={{ fontSize: 32, marginBottom: 10 }}>⏳</div>
-                  <div style={{ fontSize: 14 }}>正在建立協作連結…</div>
-                </div>
-              )}
-              {collabStatus === 'done' && (
-                <div>
-                  <div style={{ fontSize: 13, color: colors.slate, marginBottom: 12 }}>
-                    把以下連結傳給朋友，大家都可以即時編輯這份行程：
+          {modal === 'collab' && (() => {
+            const ct = collabTripId ? data.trips.find(t => t.id === collabTripId) : null;
+            const memberList = Object.values(ct?.members || {}).sort((a, b) =>
+              a.role === 'owner' ? -1 : b.role === 'owner' ? 1 : a.email.localeCompare(b.email)
+            );
+            const memberEmailSet = new Set(memberList.map(m => m.email.toLowerCase()));
+            const pendingEmails = (ct?.invitedEmails || []).filter(e => !memberEmailSet.has(e));
+            return (
+              <Modal title="🤝 協作行程" onClose={() => { setModal(null); setCollabStatus('idle'); setCollabTripId(null); setCollabIsOwner(false); }}>
+                {collabStatus === 'loading' && (
+                  <div style={{ textAlign: 'center', padding: '24px 0', color: colors.mist }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>⏳</div>
+                    <div style={{ fontSize: 14 }}>正在建立協作連結…</div>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', background: colors.fog, borderRadius: 10, padding: '10px 14px', marginBottom: 16 }}>
-                    <span style={{ flex: 1, fontSize: 12, color: colors.ink, wordBreak: 'break-all' as const }}>
-                      {collabUrl}
-                    </span>
-                    <Button
-                      variant="pri"
-                      size="small"
-                      onClick={() => {
-                        navigator.clipboard.writeText(collabUrl);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      }}
-                    >
-                      {copied ? '✓ 已複製' : '複製'}
-                    </Button>
+                )}
+                {collabStatus === 'done' && (
+                  <div>
+                    {/* 分享連結 — 僅擁有者 */}
+                    {collabIsOwner && (
+                      <>
+                        <div style={{ fontSize: 13, color: colors.slate, marginBottom: 12 }}>
+                          把以下連結傳給受邀成員，他們可以即時編輯這份行程：
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', background: colors.fog, borderRadius: 10, padding: '10px 14px', marginBottom: 12 }}>
+                          <span style={{ flex: 1, fontSize: 12, color: colors.ink, wordBreak: 'break-all' as const }}>
+                            {collabUrl}
+                          </span>
+                          <Button
+                            variant="pri"
+                            size="small"
+                            onClick={() => {
+                              navigator.clipboard.writeText(collabUrl);
+                              setCopied(true);
+                              setTimeout(() => setCopied(false), 2000);
+                            }}
+                          >
+                            {copied ? '✓ 已複製' : '複製'}
+                          </Button>
+                        </div>
+                        <div style={{ fontSize: 12, color: colors.mist, marginBottom: memberList.length > 0 ? 20 : 0 }}>
+                          💡 連結永久有效，僅受邀的成員可以存取。
+                        </div>
+                      </>
+                    )}
+
+                    {/* 成員區塊：清單所有人可見，邀請/移除/角色調整僅擁有者 */}
+                    {(collabIsOwner || memberList.length > 0) && (
+                      <div style={{ borderTop: `1px solid ${colors.cloud}`, paddingTop: 16 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: colors.ink, marginBottom: 12 }}>👥 成員</div>
+
+                        {/* 邀請輸入框 — 僅擁有者 */}
+                        {collabIsOwner && (
+                          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                            <input
+                              type="email"
+                              placeholder="輸入 Email 邀請成員…"
+                              value={inviteEmail}
+                              onChange={e => setInviteEmail(e.target.value)}
+                              onKeyDown={async e => { if (e.key === 'Enter' && ct?.collabId) await handleInvite(ct.collabId); }}
+                              style={{ ...Sty.inp, flex: 1 }}
+                            />
+                            <Button
+                              variant="pri"
+                              size="small"
+                              disabled={inviteLoading || !inviteEmail.trim()}
+                              onClick={async () => { if (ct?.collabId) await handleInvite(ct.collabId); }}
+                            >
+                              {inviteLoading ? '…' : '邀請'}
+                            </Button>
+                          </div>
+                        )}
+
+                        {/* 已加入成員清單 — 所有人可見 */}
+                        {memberList.length > 0 && (
+                          <div style={{ marginBottom: collabIsOwner && pendingEmails.length > 0 ? 14 : 0 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: colors.mist, textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: 8 }}>已加入的成員</div>
+                            {memberList.map(m => (
+                              <div key={m.uid} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${colors.fog}` }}>
+                                {m.photoURL ? (
+                                  <img src={m.photoURL} alt="" style={{ width: 30, height: 30, borderRadius: '50%', objectFit: 'cover' as const, flexShrink: 0 }} />
+                                ) : (
+                                  <div style={{ width: 30, height: 30, borderRadius: '50%', background: colors.cloud, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: colors.white, fontWeight: 700, flexShrink: 0 }}>
+                                    {(m.displayName || m.email).charAt(0).toUpperCase()}
+                                  </div>
+                                )}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 600, color: colors.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                                    {m.displayName || m.email}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: colors.mist, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                                    {m.email}
+                                  </div>
+                                </div>
+                                {m.role === 'owner' ? (
+                                  <span style={{ fontSize: 11, color: colors.coral, fontWeight: 700, whiteSpace: 'nowrap' as const }}>✦ 擁有者</span>
+                                ) : collabIsOwner ? (
+                                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                                    <select
+                                      value={m.role}
+                                      onChange={async e => {
+                                        if (!ct?.collabId) return;
+                                        await updateMemberRole(ct.collabId, m.uid, e.target.value as CollabRole);
+                                      }}
+                                      style={{ fontSize: 12, border: `1px solid ${colors.cloud}`, borderRadius: 6, padding: '4px 8px', background: colors.white, color: colors.ink, cursor: 'pointer', fontFamily: fonts.body }}
+                                    >
+                                      <option value="editor">✏️ 編輯</option>
+                                      <option value="viewer">👁 查看</option>
+                                    </select>
+                                    <Button
+                                      variant="dan"
+                                      size="small"
+                                      onClick={async () => {
+                                        if (!ct?.collabId) return;
+                                        await removeMember(ct.collabId, m.uid, m.email);
+                                      }}
+                                    >
+                                      移除
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <span style={{ fontSize: 11, fontWeight: 600, color: m.role === 'editor' ? colors.tealDark : colors.mist, background: m.role === 'editor' ? colors.tealLight : colors.fog, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' as const }}>
+                                    {m.role === 'editor' ? '✏️ 編輯' : '👁 查看'}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* 待加入（已邀請）— 僅擁有者 */}
+                        {collabIsOwner && pendingEmails.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: colors.mist, textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: 8 }}>待加入（已邀請）</div>
+                            {pendingEmails.map(email => (
+                              <div key={email} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: `1px solid ${colors.fog}` }}>
+                                <div style={{ width: 30, height: 30, borderRadius: '50%', background: colors.fog, border: `1px solid ${colors.cloud}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, flexShrink: 0 }}>
+                                  ✉️
+                                </div>
+                                <div style={{ flex: 1, fontSize: 13, color: colors.slate }}>{email}</div>
+                                <Button
+                                  variant="dan"
+                                  size="small"
+                                  onClick={async () => {
+                                    if (!ct?.collabId) return;
+                                    await revokeInvite(ct.collabId, email);
+                                  }}
+                                >
+                                  撤回
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ fontSize: 12, color: colors.mist }}>
-                    💡 所有人的修改都會即時同步。連結永久有效，隨時可再從行程卡片取得。
+                )}
+                {collabStatus === 'error' && (
+                  <div style={{ textAlign: 'center', padding: '16px 0', color: colors.danger }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>⚠️</div>
+                    <div style={{ fontSize: 14, marginBottom: 12 }}>建立失敗，請確認網路連線</div>
+                    <Button onClick={() => setModal(null)}>關閉</Button>
                   </div>
-                </div>
-              )}
-              {collabStatus === 'error' && (
-                <div style={{ textAlign: 'center', padding: '16px 0', color: colors.danger }}>
-                  <div style={{ fontSize: 32, marginBottom: 10 }}>⚠️</div>
-                  <div style={{ fontSize: 14, marginBottom: 12 }}>建立失敗，請確認網路連線</div>
-                  <Button onClick={() => setModal(null)}>關閉</Button>
-                </div>
-              )}
-            </Modal>
-          )}
+                )}
+              </Modal>
+            );
+          })()}
 
           {modal === 'new' && (
             <TripModal

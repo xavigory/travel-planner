@@ -34,9 +34,10 @@ const Sty = {
 interface ItineraryTabProps {
   trip: Trip;
   upTrip: (fn: (t: Trip) => Trip) => void;
+  readOnly?: boolean;
 }
 
-export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
+export default function ItineraryTab({ trip, upTrip, readOnly = false }: ItineraryTabProps) {
   const [col, setCol] = useState<Record<string, boolean>>({});
   const [modal, setModal] = useState<string | null>(null);
   const [ctx, setCtx] = useState<any>(null);
@@ -135,6 +136,7 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
   }
 
   function autoItems(ds: string) {
+    if (readOnly) return [];
     const items: any[] = [];
     (trip.accommodations || []).forEach(a => {
       if (a.checkIn === ds) {
@@ -211,7 +213,7 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
     }));
   }
 
-  const ChipPanel = unplaced.length > 0 ? (
+  const ChipPanel = !readOnly && unplaced.length > 0 ? (
     <div
       draggable
       onDragStart={e => {
@@ -330,8 +332,8 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
         const isOver = dragOverDay === ds;
         return (
           <div key={ds}>
-            {unplaced.length > 0 && <PanelDropZone idx={i} />}
-            {unplaced.length > 0 && panelPos === i && ChipPanel}
+            {!readOnly && unplaced.length > 0 && <PanelDropZone idx={i} />}
+            {!readOnly && unplaced.length > 0 && panelPos === i && ChipPanel}
             <div
               style={{
                 ...Sty.card,
@@ -421,7 +423,7 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
                       dragRef.current?.ds === ds && dragRef.current?.id === id;
                     const isDropTarget = dropTargetId === id;
                     const isAuto = !!auto;
-                    const dragHandlers = {
+                    const dragHandlers = readOnly ? {} : {
                       draggable: true,
                       onDragStart: (e: DragEvent) => {
                         e.stopPropagation();
@@ -557,24 +559,26 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
                             </div>
                           )}
                         </div>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          <Button
-                            size="small"
-                            onClick={() => {
-                              setCtx({ ds, item });
-                              setModal('edit');
-                            }}
-                          >
-                            ✏️
-                          </Button>
-                          <Button
-                            variant="dan"
-                            size="small"
-                            onClick={() => delItem(ds, item.id)}
-                          >
-                            ✕
-                          </Button>
-                        </div>
+                        {!readOnly && (
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                setCtx({ ds, item });
+                                setModal('edit');
+                              }}
+                            >
+                              ✏️
+                            </Button>
+                            <Button
+                              variant="dan"
+                              size="small"
+                              onClick={() => delItem(ds, item.id)}
+                            >
+                              ✕
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -591,16 +595,18 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
                       放開以加入此天 ✈️
                     </div>
                   )}
-                  <Button
-                    size="small"
-                    onClick={() => {
-                      setCtx({ ds });
-                      setModal('add');
-                    }}
-                    style={{ marginTop: 10, fontSize: 12 }}
-                  >
-                    ＋ 新增項目
-                  </Button>
+                  {!readOnly && (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setCtx({ ds });
+                        setModal('add');
+                      }}
+                      style={{ marginTop: 10, fontSize: 12 }}
+                    >
+                      ＋ 新增項目
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
@@ -609,8 +615,8 @@ export default function ItineraryTab({ trip, upTrip }: ItineraryTabProps) {
       })}
       {unplaced.length > 0 && days.length > 0 && (
         <>
-          <PanelDropZone idx={days.length} />
-          {panelPos === days.length && ChipPanel}
+          {!readOnly && <PanelDropZone idx={days.length} />}
+          {!readOnly && panelPos === days.length && ChipPanel}
         </>
       )}
 

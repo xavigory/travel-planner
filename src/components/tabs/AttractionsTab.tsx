@@ -34,9 +34,10 @@ const Sty = {
 interface AttractionsTabProps {
   trip: Trip;
   upTrip: (fn: (t: Trip) => Trip) => void;
+  readOnly?: boolean;
 }
 
-export default function AttractionsTab({ trip, upTrip }: AttractionsTabProps) {
+export default function AttractionsTab({ trip, upTrip, readOnly = false }: AttractionsTabProps) {
   const [modal, setModal] = useState<string | null>(null);
   const [editAttr, setEditAttr] = useState<any>(null);
   const [batch, setBatch] = useState('');
@@ -216,23 +217,23 @@ export default function AttractionsTab({ trip, upTrip }: AttractionsTabProps) {
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <Button variant="pri" onClick={() => { setEditAttr(null); setModal('add'); }}>
-          ＋ 新增景點
-        </Button>
-        <Button onClick={() => setModal('batch')}>📋 批次新增</Button>
-        {hasApiKey && unqueriedCount > 0 && (
-          <Button
-            variant="violet"
-            onClick={queryAll}
-            disabled={batchQuerying}
-          >
-            {batchQuerying
-              ? `⏳ 查詢中（還剩 ${querying.size} 個）…`
-              : `🔍 查詢景點資訊（${unqueriedCount} 個）`}
-          </Button>
+        {!readOnly && (
+          <>
+            <Button variant="pri" onClick={() => { setEditAttr(null); setModal('add'); }}>
+              ＋ 新增景點
+            </Button>
+            <Button onClick={() => setModal('batch')}>📋 批次新增</Button>
+            {hasApiKey && unqueriedCount > 0 && (
+              <Button variant="violet" onClick={queryAll} disabled={batchQuerying}>
+                {batchQuerying
+                  ? `⏳ 查詢中（還剩 ${querying.size} 個）…`
+                  : `🔍 查詢景點資訊（${unqueriedCount} 個）`}
+              </Button>
+            )}
+          </>
         )}
         {sorted.length > 0 && (
-          <Button size="small" style={{ marginLeft: 'auto' }} onClick={toggleAll}>
+          <Button size="small" style={{ marginLeft: readOnly ? undefined : 'auto' }} onClick={toggleAll}>
             {allCollapsed ? '⊞ 展開全部' : '⊟ 收合全部'}
           </Button>
         )}
@@ -333,34 +334,36 @@ export default function AttractionsTab({ trip, upTrip }: AttractionsTabProps) {
                   )}
                 </div>
 
-                {/* 操作按鈕 */}
-                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  {hasApiKey && (
-                    <button
-                      disabled={isQuerying}
-                      onClick={() => queryOne(a.id, safeStr(a.name))}
-                      title="查詢此景點的資訊（Google Places）"
-                      style={{
-                        padding: '4px 8px',
-                        borderRadius: 8,
-                        border: `1.5px solid ${colors.violetMid}`,
-                        background: isQuerying ? colors.fog : colors.violetLight,
-                        cursor: isQuerying ? 'wait' : 'pointer',
-                        fontSize: 13,
-                        lineHeight: 1,
-                        color: colors.violetDark,
-                      }}
-                    >
-                      {isQuerying ? '⏳' : '🤖'}
-                    </button>
-                  )}
-                  <Button size="small" onClick={() => { setEditAttr(a); setModal('edit'); }}>
-                    ✏️
-                  </Button>
-                  <Button variant="dan" size="small" onClick={() => delA(a.id)}>
-                    ✕
-                  </Button>
-                </div>
+                {/* 操作按鈕（唯讀時隱藏） */}
+                {!readOnly && (
+                  <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                    {hasApiKey && (
+                      <button
+                        disabled={isQuerying}
+                        onClick={() => queryOne(a.id, safeStr(a.name))}
+                        title="查詢此景點的資訊（Google Places）"
+                        style={{
+                          padding: '4px 8px',
+                          borderRadius: 8,
+                          border: `1.5px solid ${colors.violetMid}`,
+                          background: isQuerying ? colors.fog : colors.violetLight,
+                          cursor: isQuerying ? 'wait' : 'pointer',
+                          fontSize: 13,
+                          lineHeight: 1,
+                          color: colors.violetDark,
+                        }}
+                      >
+                        {isQuerying ? '⏳' : '🤖'}
+                      </button>
+                    )}
+                    <Button size="small" onClick={() => { setEditAttr(a); setModal('edit'); }}>
+                      ✏️
+                    </Button>
+                    <Button variant="dan" size="small" onClick={() => delA(a.id)}>
+                      ✕
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
