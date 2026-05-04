@@ -216,24 +216,26 @@ export default function AttractionsTab({ trip, upTrip, readOnly = false }: Attra
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        {!readOnly && (
-          <>
-            <Button variant="pri" onClick={() => { setEditAttr(null); setModal('add'); }}>
-              ＋ 新增景點
-            </Button>
-            <Button onClick={() => setModal('batch')}>📋 批次新增</Button>
-            {hasApiKey && unqueriedCount > 0 && (
-              <Button variant="violet" onClick={queryAll} disabled={batchQuerying}>
-                {batchQuerying
-                  ? `⏳ 查詢中（還剩 ${querying.size} 個）…`
-                  : `🔍 查詢景點資訊（${unqueriedCount} 個）`}
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${colors.fog}`, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {!readOnly && (
+            <>
+              <Button variant="pri" size="small" onClick={() => { setEditAttr(null); setModal('add'); }}>
+                ＋ 新增景點
               </Button>
-            )}
-          </>
-        )}
+              <Button size="small" onClick={() => setModal('batch')}>📋 批次新增</Button>
+              {hasApiKey && unqueriedCount > 0 && (
+                <Button variant="violet" size="small" onClick={queryAll} disabled={batchQuerying}>
+                  {batchQuerying
+                    ? `⏳ 查詢中（還剩 ${querying.size} 個）…`
+                    : `🔍 查詢景點資訊（${unqueriedCount} 個）`}
+                </Button>
+              )}
+            </>
+          )}
+        </div>
         {sorted.length > 0 && (
-          <Button size="small" style={{ marginLeft: readOnly ? undefined : 'auto' }} onClick={toggleAll}>
+          <Button size="small" onClick={toggleAll}>
             {allCollapsed ? '⊞ 展開全部' : '⊟ 收合全部'}
           </Button>
         )}

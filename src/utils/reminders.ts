@@ -13,6 +13,7 @@ export function collectReminders(trips: Trip[]): Reminder[] {
       const tr = a.ticketReminder;
       if (tr && tr.date) {
         const diff = Math.round((new Date(tr.date + 'T00:00:00').getTime() - now.getTime()) / 86400000);
+        if (diff < 0) return;
         rem.push({
           type: 'ticket',
           tripName: tname,

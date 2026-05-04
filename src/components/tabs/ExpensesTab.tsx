@@ -74,14 +74,14 @@ export default function ExpensesTab({ trip, upTrip }: ExpensesTabProps) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
-        <Button variant="pri" onClick={() => {
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${colors.fog}`, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Button variant="pri" size="small" onClick={() => {
           setEditExp(null);
           setModal('add');
         }}>
           ＋ 新增支出
         </Button>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, background: colors.fog, borderRadius: 10, padding: 4 }}>
+        <div style={{ display: 'flex', gap: 4, background: colors.fog, borderRadius: 10, padding: 4 }}>
           <button
             style={{
               padding: '5px 14px',

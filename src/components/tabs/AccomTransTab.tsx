@@ -40,6 +40,14 @@ interface AccomTransTabProps {
 export default function AccomTransTab({ trip, upTrip }: AccomTransTabProps) {
   const [modal, setModal] = useState<string | null>(null);
   const [ctx, setCtx] = useState<any>(null);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  function toggleExpand(id: string) {
+    setExpanded(e => ({ ...e, [id]: !e[id] }));
+  }
+  function expandAll(ids: string[]) {
+    setExpanded(e => Object.fromEntries(ids.map(id => [id, !ids.every(i => e[i])])));
+  }
 
   function autoExp(t2: Trip, type: string, id: string, amount: any, currency: string, date: string, note: string) {
     const exps = (t2.expenses || []).filter(e => e.autoFrom !== type + id);
@@ -121,7 +129,7 @@ export default function AccomTransTab({ trip, upTrip }: AccomTransTabProps) {
 
   function CancelTag({ ds }: { ds?: string }) {
     const n = cancelLeft(ds);
-    if (n === null) return null;
+    if (n === null || n < 0) return null;
     const [bg, fc] =
       n <= 3
         ? [colors.dangerLight, colors.dangerDark]
@@ -137,118 +145,124 @@ export default function AccomTransTab({ trip, upTrip }: AccomTransTabProps) {
     );
   }
 
+  const accoms = trip.accommodations || [];
+  const trans = trip.transports || [];
+  const accomAllExp = accoms.length > 0 && accoms.every(a => expanded[a.id]);
+  const transAllExp = trans.length > 0 && trans.every(t => expanded[t.id]);
+
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 500, color: colors.ink }}>
-          🏨 住宿
-        </div>
-        <Button
-          variant="pri"
-          size="small"
-          onClick={() => {
-            setCtx({ type: 'accom' });
-            setModal('add');
-          }}
-        >
+      {/* ── 住宿 ── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 10, marginBottom: 8, borderBottom: `1px solid ${colors.fog}` }}>
+        <Button variant="pri" size="small" onClick={() => { setCtx({ type: 'accom' }); setModal('add'); }}>
           ＋ 新增住宿
         </Button>
+        {accoms.length > 0 && (
+          <Button size="small" onClick={() => expandAll(accoms.map(a => a.id))}>
+            {accomAllExp ? '⊟ 收合全部' : '⊞ 展開全部'}
+          </Button>
+        )}
       </div>
-      {(trip.accommodations || []).length === 0 && (
-        <p style={{ fontSize: 13, color: colors.mist, marginBottom: 16 }}>尚無住宿</p>
-      )}
-      {(trip.accommodations || []).map(a => (
+      <div style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 500, color: colors.ink, marginBottom: 10 }}>🏨 住宿</div>
+      {accoms.length === 0 && <p style={{ fontSize: 13, color: colors.mist, marginBottom: 16 }}>尚無住宿</p>}
+      {accoms.map(a => (
         <div key={a.id} style={Sty.card}>
-          <div style={{ padding: '12px 16px' }}>
+          <div
+            style={{ padding: '12px 16px', cursor: 'pointer' }}
+            onClick={() => toggleExpand(a.id)}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <div style={{ fontFamily: fonts.display, fontSize: 15, fontWeight: 500, color: colors.ink }}>
-                  {safeStr(a.name)}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: fonts.display, fontSize: 15, fontWeight: 500, color: colors.ink }}>
+                    {safeStr(a.name)}
+                  </span>
+                  <span style={{ fontSize: 10, color: colors.mist, transition: 'transform .2s', display: 'inline-block', transform: expanded[a.id] ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
                 </div>
                 <div style={{ fontSize: 12, color: colors.mist, marginTop: 2 }}>
-                  {a.platform}
+                  {[a.platform, a.checkIn && a.checkOut ? `${a.checkIn} ～ ${a.checkOut}` : a.checkIn].filter(Boolean).join(' · ')}
                 </div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {!a.amount && (
-                    <Badge fc={colors.dangerDark} bg={colors.dangerLight} text="待訂" />
-                  )}
-                  {a.amount && a.freeCancel && (
+                  {!a.amount && <Badge fc={colors.dangerDark} bg={colors.dangerLight} text="待訂" />}
+                  {a.amount && a.freeCancel && (cancelLeft(a.freeCancel) ?? -1) >= 0 && (
                     <Badge fc={colors.tealDark} bg={colors.tealLight} text="✓ 可免費取消" />
                   )}
                   <CancelTag ds={a.freeCancel} />
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    setCtx({ type: 'accom', item: a });
-                    setModal('edit');
-                  }}
-                >
-                  ✏️
-                </Button>
-                <Button variant="dan" size="small" onClick={() => delAccom(a.id)}>
-                  ✕
-                </Button>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+                <Button size="small" onClick={() => { setCtx({ type: 'accom', item: a }); setModal('edit'); }}>✏️</Button>
+                <Button variant="dan" size="small" onClick={() => delAccom(a.id)}>✕</Button>
               </div>
             </div>
           </div>
+          {expanded[a.id] && (
+            <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${colors.fog}`, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
+              {a.checkIn && <Row label="入住" value={`${a.checkIn}${a.checkInTime ? ' ' + a.checkInTime : ''}`} />}
+              {a.checkOut && <Row label="退房" value={`${a.checkOut}${a.checkOutTime ? ' ' + a.checkOutTime : ''}`} />}
+              {a.amount && <Row label="金額" value={`${a.currency || ''} ${a.amount}`} />}
+              {a.freeCancel && <Row label="免費取消截止" value={a.freeCancel} />}
+              {a.orderId && <Row label="訂單編號" value={a.orderId} />}
+              {a.note && <Row label="備註" value={a.note} span />}
+            </div>
+          )}
         </div>
       ))}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '20px 0 12px' }}>
-        <div style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 500, color: colors.ink }}>
-          🚆 交通
-        </div>
-        <Button
-          variant="pri"
-          size="small"
-          onClick={() => {
-            setCtx({ type: 'trans' });
-            setModal('add');
-          }}
-        >
+      {/* ── 交通 ── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 10, marginTop: 20, marginBottom: 8, borderBottom: `1px solid ${colors.fog}` }}>
+        <Button variant="pri" size="small" onClick={() => { setCtx({ type: 'trans' }); setModal('add'); }}>
           ＋ 新增交通
         </Button>
+        {trans.length > 0 && (
+          <Button size="small" onClick={() => expandAll(trans.map(t => t.id))}>
+            {transAllExp ? '⊟ 收合全部' : '⊞ 展開全部'}
+          </Button>
+        )}
       </div>
-      {(trip.transports || []).length === 0 && (
-        <p style={{ fontSize: 13, color: colors.mist }}>尚無交通</p>
-      )}
-      {(trip.transports || []).map(tr => (
+      <div style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 500, color: colors.ink, marginBottom: 10 }}>🚆 交通</div>
+      {trans.length === 0 && <p style={{ fontSize: 13, color: colors.mist }}>尚無交通</p>}
+      {trans.map(tr => (
         <div key={tr.id} style={Sty.card}>
-          <div style={{ padding: '12px 16px' }}>
+          <div
+            style={{ padding: '12px 16px', cursor: 'pointer' }}
+            onClick={() => toggleExpand(tr.id)}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <div style={{ fontFamily: fonts.display, fontSize: 15, fontWeight: 500, color: colors.ink }}>
-                  {safeStr(tr.type)} · {safeStr(tr.from)} → {safeStr(tr.to)}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: fonts.display, fontSize: 15, fontWeight: 500, color: colors.ink }}>
+                    {safeStr(tr.type)} · {safeStr(tr.from)} → {safeStr(tr.to)}
+                  </span>
+                  <span style={{ fontSize: 10, color: colors.mist, transition: 'transform .2s', display: 'inline-block', transform: expanded[tr.id] ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                </div>
+                <div style={{ fontSize: 12, color: colors.mist, marginTop: 2 }}>
+                  {[tr.date, tr.depTime && tr.arrTime ? `${tr.depTime} → ${tr.arrTime}` : tr.depTime].filter(Boolean).join(' · ')}
                 </div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {!tr.amount && (
-                    <Badge fc={colors.dangerDark} bg={colors.dangerLight} text="待訂" />
-                  )}
-                  {tr.amount && tr.freeCancel && (
+                  {!tr.amount && <Badge fc={colors.dangerDark} bg={colors.dangerLight} text="待訂" />}
+                  {tr.amount && tr.freeCancel && (cancelLeft(tr.freeCancel) ?? -1) >= 0 && (
                     <Badge fc={colors.tealDark} bg={colors.tealLight} text="✓ 可免費取消" />
                   )}
                   <CancelTag ds={tr.freeCancel} />
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    setCtx({ type: 'trans', item: tr });
-                    setModal('edit');
-                  }}
-                >
-                  ✏️
-                </Button>
-                <Button variant="dan" size="small" onClick={() => delTrans(tr.id)}>
-                  ✕
-                </Button>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+                <Button size="small" onClick={() => { setCtx({ type: 'trans', item: tr }); setModal('edit'); }}>✏️</Button>
+                <Button variant="dan" size="small" onClick={() => delTrans(tr.id)}>✕</Button>
               </div>
             </div>
           </div>
+          {expanded[tr.id] && (
+            <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${colors.fog}`, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
+              {tr.date && <Row label="日期" value={tr.date} />}
+              {(tr.depTime || tr.arrTime) && <Row label="時間" value={[tr.depTime, tr.arrTime].filter(Boolean).join(' → ')} />}
+              {tr.amount && <Row label="金額" value={`${tr.currency || ''} ${tr.amount}`} />}
+              {tr.freeCancel && <Row label="免費取消截止" value={tr.freeCancel} />}
+              {tr.orderId && <Row label="訂單編號" value={tr.orderId} />}
+              {tr.note && <Row label="備註" value={tr.note} span />}
+            </div>
+          )}
         </div>
       ))}
 
@@ -296,6 +310,15 @@ export default function AccomTransTab({ trip, upTrip }: AccomTransTabProps) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function Row({ label, value, span }: { label: string; value: string; span?: boolean }) {
+  return (
+    <div style={span ? { gridColumn: '1 / -1' } : undefined}>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: colors.mist, marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 13, color: colors.ink }}>{value}</div>
     </div>
   );
 }

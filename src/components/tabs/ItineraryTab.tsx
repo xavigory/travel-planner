@@ -307,19 +307,21 @@ export default function ItineraryTab({ trip, upTrip, readOnly = false }: Itinera
 
   return (
     <div>
-      {unplaced.length > 0 && panelPos === null && ChipPanel}
-
       {days.length === 0 && (
         <p style={{ color: colors.mist, fontSize: 14 }}>請先設定旅行日期</p>
       )}
 
       {days.length > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
-          <Button size="small" onClick={toggleAllDays}>
-            {allCollapsed ? '⊞ 展開全部' : '⊟ 收合全部'}
-          </Button>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${colors.fog}` }}>
+          {!readOnly && (
+            <Button size="small" onClick={toggleAllDays}>
+              {allCollapsed ? '⊞ 展開全部' : '⊟ 收合全部'}
+            </Button>
+          )}
         </div>
       )}
+
+      {!readOnly && unplaced.length > 0 && panelPos === null && ChipPanel}
 
       {days.map((ds, i) => {
         const open = col[ds] !== true;
